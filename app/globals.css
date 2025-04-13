@@ -1,0 +1,26 @@
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  max-width: 100vw;
+  max-height: 100vh;
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+}
+
+body {
+  background: #000;
+  position: relative;
+}
+
+canvas {
+  width: 100% !important;
+  height: 100% !important;
+  touch-action: none;
+  outline: none;
+} 

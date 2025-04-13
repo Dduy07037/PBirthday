@@ -1,0 +1,23 @@
+{
+  "name": "birthday-3d-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@react-three/drei": "^9.77.0",
+    "@react-three/fiber": "^8.13.0",
+    "gltf-loader-ts": "^0.3.1",
+    "next": "14.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "three": "^0.152.2"
+  },
+  "devDependencies": {
+    "file-loader": "^6.2.0"
+  }
+}
