@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef, Suspense, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useRef, Suspense, useMemo, useCallback, useImperativeHandle } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls, useGLTF, Html, Environment, Stage } from '@react-three/drei';
 import * as THREE from 'three';
@@ -23,23 +23,429 @@ const COLORS = {
     '#FAF0E6'  // Linen
   ],
   sunColor: '#FF3F00', // Màu mặt trời hoàng hôn đỏ cam
-  cloudColor: '#FFA07A' // Màu mây hồng cam khi hoàng hôn
+  cloudColor: '#FFA07A', // Màu mây hồng cam khi hoàng hôn
+  highlightColor: '#FFFFFF' // Màu viền khi hover
 };
 
 // Simple Model component that displays a 3D model
-function Model({ onLoad, onError, housePosition, houseScale, onHouseRefReady }) {
+function Model({ onLoad, onError, housePosition, houseScale, onHouseRefReady, onCameraMove, onZoomChange, orbitTargetRef, orbitControlsRef }) {
   // Setup camera
   const { camera, scene } = useThree();
-  const houseModelRef = useRef();
+  const houseModelRef = useRef(); // Reference to the primitive (house.scene)
+  const houseContainerRef = useRef(); // Reference to the container group
   const catModelRef = useRef();
   
-  // Gửi tham chiếu về component cha khi sẵn sàng
+  // Add hover state
+  const [hovered, setHovered] = useState(false);
+  const [zoomed, setZoomed] = useState(false);
+  
+  // Debug function to reset zoomed state
+  const resetZoomedState = () => {
+    console.log("Forcing reset of zoomed state from:", zoomed, "to false");
+    setZoomed(false);
+    if (onZoomChange) onZoomChange(false);
+  };
+  
+  // Track when zoomed state changes
   useEffect(() => {
-    if (houseModelRef.current && onHouseRefReady) {
-      onHouseRefReady(houseModelRef.current);
-      console.log("Đã gửi tham chiếu houseModelRef lên component cha");
+    console.log("Zoomed state changed to:", zoomed);
+  }, [zoomed]);
+  
+  // Define the exact target position - UPDATE with the new position from user
+  const EXACT_POSITION = {
+    x: 126.48658022678504,
+    y: -2.165676964362664,
+    z: -45.46558342895352
+  };
+  
+  // Define the exact target look-at point - NEW 
+  const EXACT_TARGET = {
+    x: 51.05976520197271,
+    y: -19.206661756215915,
+    z: -122.19205213995362
+  };
+  
+  // Debug log to verify constants
+  console.log("EXACT_POSITION defined as:", EXACT_POSITION);
+  console.log("EXACT_TARGET defined as:", EXACT_TARGET);
+  
+  // Track current camera position for parent component
+  useFrame(() => {
+    if (onCameraMove) {
+      // Don't round the values - use exact values
+      onCameraMove({
+        position: {
+          x: camera.position.x,
+          y: camera.position.y,
+          z: camera.position.z
+        },
+        target: orbitTargetRef?.current || { x: 0, y: 0, z: 0 }
+      });
     }
-  }, [houseModelRef.current, onHouseRefReady]);
+  });
+  
+  // Original camera position and target
+  const originalCameraPos = useMemo(() => new THREE.Vector3(155.1, 24.66, 13.16), []);
+  const originalTarget = useMemo(() => new THREE.Vector3(104.09, 9.01, -71.42), []);
+  
+  // Handle click to zoom
+  const handleHouseClick = useCallback(() => {
+    console.log("handleHouseClick called, zoomed state:", zoomed);
+    if (!zoomed) {
+      // Zoom in - animate camera movement
+      setZoomed(true);
+      if (onZoomChange) onZoomChange(true);
+      console.log("Zoom state set to true");
+      
+      // Disable orbit controls completely during animation
+      if (orbitControlsRef.current) {
+        // Use try-catch to handle potential errors with OrbitControls
+        try {
+          if (typeof orbitControlsRef.current.enabled !== 'undefined') {
+            orbitControlsRef.current.enabled = false;
+            console.log("OrbitControls disabled");
+          }
+          if (orbitControlsRef.current.setEnabled) {
+            orbitControlsRef.current.setEnabled(false);
+          }
+        } catch (e) {
+          console.warn("Could not disable orbit controls", e);
+        }
+      }
+      
+      // Force remove any hover effect immediately
+      if (hovered) {
+        setHovered(false);
+        document.body.style.cursor = 'default';
+      }
+      
+      // Get initial camera state
+      const startPos = camera.position.clone();
+      const startQuat = camera.quaternion.clone();
+      console.log("Starting camera position:", startPos);
+      
+      // Define end state
+      const endPos = new THREE.Vector3(
+        EXACT_POSITION.x,
+        EXACT_POSITION.y,
+        EXACT_POSITION.z
+      );
+      
+      const endTarget = new THREE.Vector3(
+        EXACT_TARGET.x,
+        EXACT_TARGET.y,
+        EXACT_TARGET.z
+      );
+      
+      console.log("Target position:", endPos);
+      console.log("Target look-at:", endTarget);
+      
+      // Pre-calculate end quaternion for smooth rotation
+      const endDirection = new THREE.Vector3().subVectors(endTarget, endPos).normalize();
+      const endQuat = new THREE.Quaternion().setFromUnitVectors(
+        new THREE.Vector3(0, 0, -1),
+        endDirection
+      );
+      
+      // Animation variables
+      let animationFrameId = null;
+      let startTime = 0;  // Changed from previousTime to startTime
+      const totalDuration = 3000; // 3 seconds
+      
+      // Create dummy camera for intermediary calculations
+      const dummyCamera = new THREE.PerspectiveCamera();
+      dummyCamera.position.copy(startPos);
+      dummyCamera.quaternion.copy(startQuat);
+      
+      console.log("Animation setup complete, starting animation...");
+      
+      // Animation function - time synchronized with vsync
+      const animate = (time) => {
+        // First frame - record start time
+        if (startTime === 0) {
+          startTime = time;
+          console.log("Animation starting, first frame at time:", time);
+          animationFrameId = requestAnimationFrame(animate);
+          return;
+        }
+        
+        // Calculate elapsed time since animation start
+        const elapsedTime = time - startTime;
+        
+        // Calculate animation progress (0 to 1)
+        const progress = Math.min(elapsedTime / totalDuration, 1.0);
+        
+        // Log at roughly 10% intervals
+        if (Math.floor(progress * 10) !== Math.floor((progress - 0.001) * 10)) {
+          console.log(`Animation progress: ${(progress * 100).toFixed(0)}%, elapsed: ${elapsedTime.toFixed(0)}ms`);
+        }
+        
+        // Super smooth easing function
+        const smoothProgress = t => {
+          // Quintic ease-in-out
+          return t < 0.5
+            ? 16 * t * t * t * t * t
+            : 1 - Math.pow(-2 * t + 2, 5) / 2;
+        };
+        
+        const easedProgress = smoothProgress(progress);
+        
+        // Smoothly interpolate position
+        dummyCamera.position.lerpVectors(startPos, endPos, easedProgress);
+        
+        // Smoothly interpolate rotation
+        dummyCamera.quaternion.copy(startQuat).slerp(endQuat, easedProgress);
+        
+        // Apply to actual camera
+        camera.position.copy(dummyCamera.position);
+        camera.quaternion.copy(dummyCamera.quaternion);
+        
+        // Update camera matrices
+        camera.updateMatrix();
+        camera.updateProjectionMatrix();
+        camera.updateMatrixWorld(true);
+        
+        // Continue animation if not complete
+        if (progress < 0.999) { // Use slightly less than 1 to ensure we reach the end
+          animationFrameId = requestAnimationFrame(animate);
+        } else {
+          // Ensure final position is exact
+          camera.position.copy(endPos);
+          camera.lookAt(endTarget);
+          
+          // Final update of matrices
+          camera.updateMatrix();
+          camera.updateProjectionMatrix();
+          camera.updateMatrixWorld(true);
+          
+          // Update orbit target reference
+          if (orbitTargetRef && orbitTargetRef.current) {
+            orbitTargetRef.current.copy(endTarget);
+          }
+          
+          // Notify parent
+          if (onCameraMove) {
+            onCameraMove({
+              position: { 
+                x: camera.position.x, 
+                y: camera.position.y, 
+                z: camera.position.z 
+              },
+              target: { 
+                x: endTarget.x, 
+                y: endTarget.y, 
+                z: endTarget.z 
+              }
+            });
+          }
+          
+          // Re-enable orbit controls
+          if (orbitControlsRef.current) {
+            try {
+              if (typeof orbitControlsRef.current.enabled !== 'undefined') {
+                orbitControlsRef.current.enabled = true;
+                console.log("OrbitControls re-enabled after exit animation");
+              }
+              if (orbitControlsRef.current.setEnabled) {
+                orbitControlsRef.current.setEnabled(true);
+              }
+            } catch (e) {
+              console.warn("Could not re-enable orbit controls", e);
+            }
+          }
+          
+          console.log("Animation complete - camera at target position:", camera.position);
+        }
+      };
+      
+      // Start animation
+      animationFrameId = requestAnimationFrame(animate);
+      console.log("Animation started, frame ID:", animationFrameId);
+      
+      // Return cleanup
+      return () => {
+        if (animationFrameId) {
+          cancelAnimationFrame(animationFrameId);
+          console.log("Animation cleanup triggered");
+        }
+      };
+    }
+  }, [camera, orbitTargetRef, orbitControlsRef, zoomed, hovered, onZoomChange, onCameraMove, EXACT_POSITION, EXACT_TARGET]);
+  
+  // Exit zoom function with the same improved animation
+  const exitZoom = useCallback(() => {
+    if (!zoomed) return;
+    
+    console.log("exitZoom called, current zoomed state:", zoomed);
+    
+    // Update state
+    setZoomed(false);
+    if (onZoomChange) onZoomChange(false);
+    
+    // Try to disable orbit controls during animation
+    if (orbitControlsRef.current) {
+      try {
+        if (typeof orbitControlsRef.current.enabled !== 'undefined') {
+          orbitControlsRef.current.enabled = false;
+          console.log("OrbitControls disabled during exit animation");
+        }
+        if (orbitControlsRef.current.setEnabled) {
+          orbitControlsRef.current.setEnabled(false);
+        }
+      } catch (e) {
+        console.warn("Could not disable orbit controls", e);
+      }
+    }
+    
+    // Get initial camera state
+    const startPos = camera.position.clone();
+    const startQuat = camera.quaternion.clone();
+    
+    // Define end state
+    const endPos = originalCameraPos.clone();
+    const endTarget = originalTarget.clone();
+    
+    console.log("Exit zoom - moving from:", startPos);
+    console.log("Exit zoom - moving to:", endPos);
+    console.log("Exit zoom - target:", endTarget);
+    
+    // Pre-calculate end quaternion for smooth rotation
+    const endDirection = new THREE.Vector3().subVectors(endTarget, endPos).normalize();
+    const endQuat = new THREE.Quaternion().setFromUnitVectors(
+      new THREE.Vector3(0, 0, -1),
+      endDirection
+    );
+    
+    // Animation variables
+    let animationFrameId = null;
+    let startTime = 0;
+    const totalDuration = 3000; // 3 seconds
+    
+    // Create dummy camera for intermediary calculations
+    const dummyCamera = new THREE.PerspectiveCamera();
+    dummyCamera.position.copy(startPos);
+    dummyCamera.quaternion.copy(startQuat);
+    
+    // Animation function - time synchronized with vsync
+    const animate = (time) => {
+      // First frame - record start time
+      if (startTime === 0) {
+        startTime = time;
+        console.log("Exit animation starting, first frame at time:", time);
+        animationFrameId = requestAnimationFrame(animate);
+        return;
+      }
+      
+      // Calculate elapsed time since animation start
+      const elapsedTime = time - startTime;
+      
+      // Calculate animation progress (0 to 1)
+      const progress = Math.min(elapsedTime / totalDuration, 1.0);
+      
+      // Log at roughly 10% intervals
+      if (Math.floor(progress * 10) !== Math.floor((progress - 0.001) * 10)) {
+        console.log(`Exit animation progress: ${(progress * 100).toFixed(0)}%, elapsed: ${elapsedTime.toFixed(0)}ms`);
+      }
+      
+      // Super smooth easing function
+      const smoothProgress = t => {
+        // Quintic ease-in-out
+        return t < 0.5
+          ? 16 * t * t * t * t * t
+          : 1 - Math.pow(-2 * t + 2, 5) / 2;
+      };
+      
+      const easedProgress = smoothProgress(progress);
+      
+      // Smoothly interpolate position
+      dummyCamera.position.lerpVectors(startPos, endPos, easedProgress);
+      
+      // Smoothly interpolate rotation
+      dummyCamera.quaternion.copy(startQuat).slerp(endQuat, easedProgress);
+      
+      // Apply to actual camera
+      camera.position.copy(dummyCamera.position);
+      camera.quaternion.copy(dummyCamera.quaternion);
+      
+      // Update camera matrices
+      camera.updateMatrix();
+      camera.updateProjectionMatrix();
+      camera.updateMatrixWorld(true);
+      
+      // Continue animation if not complete
+      if (progress < 0.999) { // Use slightly less than 1 to ensure we reach the end
+        animationFrameId = requestAnimationFrame(animate);
+      } else {
+        // Ensure final position is exact
+        camera.position.copy(endPos);
+        camera.lookAt(endTarget);
+        
+        // Final update of matrices
+        camera.updateMatrix();
+        camera.updateProjectionMatrix();
+        camera.updateMatrixWorld(true);
+        
+        // Update orbit target reference
+        if (orbitTargetRef && orbitTargetRef.current) {
+          orbitTargetRef.current.copy(endTarget);
+        }
+        
+        // Notify parent
+        if (onCameraMove) {
+          onCameraMove({
+            position: { 
+              x: camera.position.x, 
+              y: camera.position.y, 
+              z: camera.position.z 
+            },
+            target: { 
+              x: endTarget.x, 
+              y: endTarget.y, 
+              z: endTarget.z 
+            }
+          });
+        }
+        
+        // Re-enable orbit controls
+        if (orbitControlsRef.current) {
+          try {
+            if (typeof orbitControlsRef.current.enabled !== 'undefined') {
+              orbitControlsRef.current.enabled = true;
+              console.log("OrbitControls re-enabled after exit animation");
+            }
+            if (orbitControlsRef.current.setEnabled) {
+              orbitControlsRef.current.setEnabled(true);
+            }
+          } catch (e) {
+            console.warn("Could not re-enable orbit controls", e);
+          }
+        }
+        
+        console.log("Exit animation complete - camera at original position:", camera.position);
+      }
+    };
+    
+    // Start animation
+    animationFrameId = requestAnimationFrame(animate);
+    
+    // Return cleanup
+    return () => {
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+      }
+    };
+  }, [camera, orbitTargetRef, orbitControlsRef, zoomed, onZoomChange, originalCameraPos, originalTarget]);
+  
+  // Make exitZoom available to parent component
+  useEffect(() => {
+    if (onHouseRefReady) {
+      onHouseRefReady({
+        ref: houseContainerRef.current, // Send the container ref to parent
+        modelRef: houseModelRef.current, // Also send direct model ref if needed
+        exitZoom
+      });
+    }
+  }, [houseModelRef.current, houseContainerRef.current, exitZoom, onHouseRefReady]);
   
   // Set camera position only once
   useEffect(() => {
@@ -53,18 +459,18 @@ function Model({ onLoad, onError, housePosition, houseScale, onHouseRefReady }) 
   const house = useGLTF('/cardboard_house/scene.gltf');
   const cat = useGLTF('/cat_model/scene.gltf');
   
-  // Cập nhật vị trí Y và scale khi props thay đổi
+  // Update container position instead of directly updating model
   useEffect(() => {
-    if (houseModelRef.current) {
-      houseModelRef.current.position.y = housePosition;
+    if (houseContainerRef.current) {
+      houseContainerRef.current.position.y = housePosition;
       console.log(`Vị trí Y của ngôi nhà đã được cập nhật: ${housePosition}`);
     }
   }, [housePosition]);
   
-  // Cập nhật scale khi houseScale thay đổi
+  // Update container scale instead of directly updating model
   useEffect(() => {
-    if (houseModelRef.current) {
-      houseModelRef.current.scale.set(houseScale, houseScale, houseScale);
+    if (houseContainerRef.current) {
+      houseContainerRef.current.scale.set(houseScale, houseScale, houseScale);
       console.log(`Scale của ngôi nhà đã được cập nhật: ${houseScale}`);
     }
   }, [houseScale]);
@@ -77,7 +483,7 @@ function Model({ onLoad, onError, housePosition, houseScale, onHouseRefReady }) 
     }
   }, [house, cat, onLoad]);
   
-  // Setup mô hình house
+  // Setup mô hình house với hoạt ảnh hover
   useEffect(() => {
     if (houseModelRef.current && house.scene) {
       console.log("Đang thiết lập mô hình HOUSE...");
@@ -93,6 +499,9 @@ function Model({ onLoad, onError, housePosition, houseScale, onHouseRefReady }) 
         if (child.isMesh) {
           child.castShadow = true;
           child.receiveShadow = true;
+          
+          // Lưu trữ vật liệu gốc
+          child._originalMaterial = child.material.clone();
           
           if (child.material) {
             // Làm sáng vật liệu
@@ -117,6 +526,27 @@ function Model({ onLoad, onError, housePosition, houseScale, onHouseRefReady }) 
       });
     }
   }, [house]); // Chỉ cập nhật khi house thay đổi, không phụ thuộc vào housePosition
+  
+  // Handle hover effect
+  useEffect(() => {
+    if (houseModelRef.current && house.scene) {
+      house.scene.traverse((child) => {
+        if (child.isMesh && child.material) {
+          // Only apply hover effect when not zoomed in
+          if (hovered && !zoomed) {
+            // Add glow effect when hovered
+            child.material.emissive = new THREE.Color(0xFFFFFF);
+            child.material.emissiveIntensity = 0.2;
+          } else {
+            // Remove glow effect
+            child.material.emissive = new THREE.Color(0x000000);
+            child.material.emissiveIntensity = 0;
+          }
+          child.material.needsUpdate = true;
+        }
+      });
+    }
+  }, [hovered, house.scene, zoomed]);
   
   // Setup mô hình cat
   useEffect(() => {
@@ -239,15 +669,51 @@ function Model({ onLoad, onError, housePosition, houseScale, onHouseRefReady }) 
         />
       </mesh>
       
-      {/* Mô hình House (ở giữa) */}
+      {/* Mô hình House (ở giữa) với hover và click - only clickable when not zoomed */}
       {house.scene && (
-        <primitive 
-          ref={houseModelRef}
-          object={house.scene}
+        <group
+          ref={houseContainerRef}
           position={[0, housePosition, 0]}
           rotation={[0, Math.PI / 4, 0]}
           scale={[houseScale, houseScale, houseScale]}
-        />
+          onPointerOver={() => {
+            if (!zoomed) {
+              setHovered(true);
+              document.body.style.cursor = 'pointer';
+              console.log("House hovered");
+            }
+          }}
+          onPointerOut={() => {
+            if (!zoomed) {
+              setHovered(false);
+              document.body.style.cursor = 'default';
+              console.log("House hover ended");
+            }
+          }}
+          onClick={(event) => {
+            // Prevent event propagation
+            event.stopPropagation();
+            console.log("House CLICKED at coordinates:", event.point, "zoomed state:", zoomed);
+            
+            // Force reset zoomed state if it's stuck
+            if (zoomed) {
+              resetZoomedState();
+              return;
+            }
+            
+            if (!zoomed) {
+              console.log("Calling handleHouseClick(), zoomed state is false");
+              handleHouseClick();
+            } else {
+              console.log("NOT calling handleHouseClick() because zoomed is true");
+            }
+          }}
+        >
+          <primitive 
+            ref={houseModelRef}
+            object={house.scene}
+          />
+        </group>
       )}
       
       {/* Mô hình Cat (bên trái) */}
@@ -410,14 +876,84 @@ export default function GltfModelViewer({ onLoad, onError }) {
   // Tham chiếu tới mô hình house
   const houseModelRef = useRef(null);
   
-  // State để lưu trữ vị trí camera - không cần hiển thị nữa
-  const [cameraPosition, setCameraPosition] = useState({ x: 155.1, y: 24.66, z: 13.16 });
-  const [cameraTarget, setCameraTarget] = useState({ x: 104.09, y: 9.01, z: -71.42 });
+  // Replace the camera control state with a more comprehensive one
+  const [cameraControl, setCameraControl] = useState({
+    position: { x: 155.1, y: 24.66, z: 13.16 },
+    rotation: { x: 0, y: 0, z: 0 },
+    target: { x: 104.09, y: 9.01, z: -71.42 },
+    step: 1.0 // Size of movement step
+  });
   
-  // Callback để nhận tham chiếu từ Model component
-  const handleHouseRefReady = useCallback((ref) => {
-    houseModelRef.current = ref;
+  // Add separate state for input values to prevent jumping
+  const [inputValues, setInputValues] = useState({
+    position: { x: "155.1", y: "24.66", z: "13.16" },
+    target: { x: "104.09", y: "9.01", z: "-71.42" }
+  });
+  
+  // State to track if we're zoomed in
+  const [isZoomedIn, setIsZoomedIn] = useState(false);
+  
+  // Ref to store the exitZoom function
+  const exitZoomRef = useRef(null);
+  
+  // Custom camera position state (used for the external UI controls)
+  const [customCameraPosition, setCustomCameraPosition] = useState({
+    x: 114.71,
+    y: 3.87,
+    z: -35.83,
+    apply: false
+  });
+  
+  // Add rotation controls state
+  const [rotationControls, setRotationControls] = useState({
+    enableRotation: false,
+    speed: 0.01,
+    axis: 'y' // 'x', 'y', 'z', or 'free'
+  });
+  
+  // Ref for the scene group that will rotate
+  const sceneGroupRef = useRef(null);
+  
+  // Track camera position changes - store exact values
+  const handleCameraMove = useCallback((cameraData) => {
+    setCameraControl({
+      position: {
+        x: cameraData.position.x,
+        y: cameraData.position.y,
+        z: cameraData.position.z
+      },
+      target: cameraData.target
+    });
+  }, []);
+  
+  // Handle applying custom camera position
+  const applyCustomPosition = () => {
+    setCustomCameraPosition(prev => ({
+      ...prev,
+      apply: true
+    }));
+    
+    // Reset the apply flag after a short delay
+    setTimeout(() => {
+      setCustomCameraPosition(prev => ({
+        ...prev,
+        apply: false
+      }));
+    }, 100);
+  };
+  
+  // Handle zoom state changes
+  const handleZoomChange = useCallback((zoomedIn) => {
+    setIsZoomedIn(zoomedIn);
+  }, []);
+  
+  // Store house ref and exit function
+  const handleHouseRefReady = useCallback((data) => {
+    if (data && data.ref) {
+      houseModelRef.current = data.ref;
+      exitZoomRef.current = data.exitZoom;
     console.log("Đã nhận tham chiếu houseModelRef từ Model component");
+    }
   }, []);
   
   // Callback khi model tải xong
@@ -646,6 +1182,293 @@ export default function GltfModelViewer({ onLoad, onError }) {
     );
   };
 
+  // Ref for OrbitControls
+  const orbitControlsRef = useRef(null);
+
+  // Handle rotation axis change
+  const handleRotationAxisChange = (axis) => {
+    setRotationControls(prev => ({
+      ...prev,
+      axis,
+      enableRotation: true
+    }));
+  };
+
+  // Toggle rotation on/off
+  const toggleRotation = () => {
+    setRotationControls(prev => ({
+      ...prev,
+      enableRotation: !prev.enableRotation
+    }));
+  };
+
+  // Adjust rotation speed
+  const adjustRotationSpeed = (speed) => {
+    setRotationControls(prev => ({
+      ...prev,
+      speed
+    }));
+  };
+
+  // Handle camera step movement
+  const moveCameraStep = (axis, direction, isRotation = false) => {
+    const stepSize = cameraControl.step * direction;
+    
+    // Get camera from OrbitControls
+    const camera = orbitControlsRef.current?.object;
+    const controls = orbitControlsRef.current;
+    
+    if (camera && controls) {
+      if (isRotation) {
+        // Handle rotation
+        camera.rotation[axis] += stepSize * 0.01;
+        
+        // Update state
+        setCameraControl(prev => {
+          const newState = {
+            ...prev,
+            rotation: {
+              ...prev.rotation,
+              [axis]: camera.rotation[axis]
+            }
+          };
+          
+          // Also update input values
+          setInputValues(prevInputs => ({
+            ...prevInputs,
+            rotation: {
+              ...prevInputs.rotation,
+              [axis]: camera.rotation[axis].toString()
+            }
+          }));
+          
+          return newState;
+        });
+      } else {
+        // Handle position
+        if (axis === 'target-x' || axis === 'target-y' || axis === 'target-z') {
+          // Move the orbit controls target
+          const targetAxis = axis.split('-')[1];
+          controls.target[targetAxis] += stepSize;
+          controls.update();
+          
+          // Update state
+          setCameraControl(prev => {
+            const newValue = controls.target[targetAxis];
+            
+            // Also update input values
+            setInputValues(prevInputs => ({
+              ...prevInputs,
+              target: {
+                ...prevInputs.target,
+                [targetAxis]: newValue.toString()
+              }
+            }));
+            
+            return {
+              ...prev,
+              target: {
+                ...prev.target,
+                [targetAxis]: newValue
+              }
+            };
+          });
+        } else {
+          // Move the camera position
+          camera.position[axis] += stepSize;
+          
+          // Update state
+          setCameraControl(prev => {
+            const newValue = camera.position[axis];
+            
+            // Also update input values
+            setInputValues(prevInputs => ({
+              ...prevInputs,
+              position: {
+                ...prevInputs.position,
+                [axis]: newValue.toString()
+              }
+            }));
+            
+            return {
+              ...prev,
+              position: {
+                ...prev.position,
+                [axis]: newValue
+              }
+            };
+          });
+        }
+        
+        // Update matrices
+        camera.updateMatrix();
+        camera.updateMatrixWorld();
+        camera.updateProjectionMatrix();
+      }
+      
+      // Log the current position for reference
+      console.log("Camera Position:", 
+        camera.position.x.toFixed(2),
+        camera.position.y.toFixed(2),
+        camera.position.z.toFixed(2)
+      );
+      console.log("Target Position:", 
+        controls.target.x.toFixed(2),
+        controls.target.y.toFixed(2),
+        controls.target.z.toFixed(2)
+      );
+    }
+  };
+  
+  // Handle direct input for coordinates - only update input values, not actual camera
+  const handleCoordinateInput = (type, axis, value) => {
+    // Update only the input state, don't parse to number yet
+    setInputValues(prev => ({
+      ...prev,
+      [type]: {
+        ...prev[type],
+        [axis]: value
+      }
+    }));
+  };
+  
+  // Apply camera position from inputs
+  const applyCamera = () => {
+    const camera = orbitControlsRef.current?.object;
+    const controls = orbitControlsRef.current;
+    
+    if (camera && controls) {
+      // Parse input values to numbers and update camera control state
+      const newPosition = {
+        x: parseFloat(inputValues.position.x) || 0,
+        y: parseFloat(inputValues.position.y) || 0,
+        z: parseFloat(inputValues.position.z) || 0
+      };
+      
+      const newTarget = {
+        x: parseFloat(inputValues.target.x) || 0,
+        y: parseFloat(inputValues.target.y) || 0,
+        z: parseFloat(inputValues.target.z) || 0
+      };
+      
+      // Update camera control state
+      setCameraControl(prev => ({
+        ...prev,
+        position: newPosition,
+        target: newTarget
+      }));
+      
+      // Set camera position
+      camera.position.set(
+        newPosition.x,
+        newPosition.y,
+        newPosition.z
+      );
+      
+      // Set target
+      controls.target.set(
+        newTarget.x,
+        newTarget.y,
+        newTarget.z
+      );
+      
+      // Update controls and matrices
+      controls.update();
+      camera.updateMatrix();
+      camera.updateMatrixWorld();
+      camera.updateProjectionMatrix();
+      
+      console.log("Applied camera position:", 
+        camera.position.x, camera.position.y, camera.position.z
+      );
+      console.log("Applied target:", 
+        controls.target.x, controls.target.y, controls.target.z
+      );
+    }
+  };
+  
+  // Get current camera position from OrbitControls
+  const getCurrentCamera = () => {
+    const camera = orbitControlsRef.current?.object;
+    const controls = orbitControlsRef.current;
+    
+    if (camera && controls) {
+      const newPosition = {
+        x: camera.position.x,
+        y: camera.position.y,
+        z: camera.position.z
+      };
+      
+      const newTarget = {
+        x: controls.target.x,
+        y: controls.target.y,
+        z: controls.target.z
+      };
+      
+      // Update both states
+      setCameraControl(prev => ({
+        ...prev,
+        position: newPosition,
+        rotation: {
+          x: camera.rotation.x,
+          y: camera.rotation.y,
+          z: camera.rotation.z
+        },
+        target: newTarget
+      }));
+      
+      // Update input values as strings
+      setInputValues({
+        position: {
+          x: newPosition.x.toString(),
+          y: newPosition.y.toString(),
+          z: newPosition.z.toString()
+        },
+        target: {
+          x: newTarget.x.toString(),
+          y: newTarget.y.toString(),
+          z: newTarget.z.toString()
+        }
+      });
+      
+      console.log("Retrieved current camera position:", 
+        camera.position.x.toFixed(2),
+        camera.position.y.toFixed(2),
+        camera.position.z.toFixed(2)
+      );
+    }
+  };
+  
+  // Save camera position to localStorage
+  const saveCameraPosition = () => {
+    localStorage.setItem('savedCameraPosition', JSON.stringify(cameraControl));
+    alert("Đã lưu vị trí camera thành công!");
+    console.log("Saved camera position:", cameraControl);
+  };
+  
+  // Load camera position from localStorage
+  const loadCameraPosition = () => {
+    const savedPosition = localStorage.getItem('savedCameraPosition');
+    if (savedPosition) {
+      const parsedPosition = JSON.parse(savedPosition);
+      setCameraControl(parsedPosition);
+      console.log("Loaded camera position:", parsedPosition);
+    } else {
+      alert("Không tìm thấy vị trí đã lưu!");
+    }
+  };
+
+  // Add a ref to store the OrbitControls target
+  const orbitTargetRef = useRef(new THREE.Vector3(104.09, 9.01, -71.42));
+  
+  // Callback to track orbit controls target changes
+  const handleOrbitUpdate = useCallback((self) => {
+    if (self && self.target) {
+      // Store orbit controls target in our ref for animation functions
+      orbitTargetRef.current = self.target.clone();
+    }
+  }, []);
+
   return (
     <div style={{ 
       width: '100%', 
@@ -696,13 +1519,17 @@ export default function GltfModelViewer({ onLoad, onError }) {
             housePosition={housePosition}
             houseScale={houseScale}
             onHouseRefReady={handleHouseRefReady}
+            onCameraMove={handleCameraMove}
+            onZoomChange={handleZoomChange}
+            orbitTargetRef={orbitTargetRef}
+            orbitControlsRef={orbitControlsRef}
           />
         </Suspense>
         
-        <OrbitControls 
-          enableZoom={true} 
-          enablePan={true}
-          enableRotate={true}
+        <OrbitControlsWrapper
+          ref={orbitControlsRef}
+          isZoomedIn={isZoomedIn}
+          makeDefault
           minDistance={10}
           maxDistance={400}
           minPolarAngle={Math.PI * 0.05}
@@ -712,11 +1539,400 @@ export default function GltfModelViewer({ onLoad, onError }) {
           rotateSpeed={0.8}
           enableDamping={true}
           dampingFactor={0.07}
+          onUpdate={handleOrbitUpdate}
+        />
+        
+        {/* CameraPositionSynchronizer - A THREE.js component that updates camera position when needed */}
+        <CameraPositionSynchronizer 
+          cameraControl={cameraControl}
+          isZoomedIn={isZoomedIn}
+          controlsRef={orbitControlsRef}
         />
       </Canvas>
       
       {/* Hiệu ứng đám mây loading */}
       <CloudsLoadingOverlay />
+      
+      {/* Advanced Camera Control Panel - MOVED OUTSIDE CANVAS */}
+      <div style={{
+        position: 'absolute',
+        top: '10px',
+        right: '10px',
+        background: 'rgba(0,0,0,0.8)',
+        color: 'white',
+        padding: '15px',
+        borderRadius: '8px',
+        zIndex: 1000,
+        fontFamily: 'monospace',
+        width: '300px',
+        maxHeight: '80vh',
+        overflowY: 'auto'
+      }}>
+        <div style={{ 
+          fontWeight: 'bold', 
+          textAlign: 'center', 
+          marginBottom: '10px',
+          fontSize: '16px'
+        }}>
+          Điều Khiển Camera Chính Xác
+        </div>
+        
+        {/* Step size control */}
+        <div style={{ marginBottom: '15px' }}>
+          <label style={{ display: 'block', marginBottom: '5px' }}>
+            Bước di chuyển:
+          </label>
+          <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+            {[0.1, 0.5, 1, 5, 10].map(step => (
+              <button 
+                key={step}
+                onClick={() => setCameraControl(prev => ({ ...prev, step }))}
+                style={{
+                  background: cameraControl.step === step ? '#FF7E5F' : '#444',
+                  color: 'white',
+                  border: 'none',
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '12px'
+                }}
+              >
+                {step}
+              </button>
+            ))}
+          </div>
+        </div>
+        
+        {/* Position Controls */}
+        <div style={{ 
+          marginBottom: '15px', 
+          padding: '10px', 
+          background: 'rgba(255,255,255,0.1)',
+          borderRadius: '6px' 
+        }}>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px' }}>Vị Trí Camera:</div>
+          
+          {/* X Position */}
+          <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'center' }}>
+            <div style={{ width: '20px' }}>X:</div>
+            <input
+              type="text"
+              value={inputValues.position.x}
+              onChange={(e) => handleCoordinateInput('position', 'x', e.target.value)}
+              style={{ 
+                flex: 1,
+                margin: '0 10px',
+                background: '#222', 
+                color: 'white', 
+                border: '1px solid #444', 
+                padding: '4px' 
+              }}
+            />
+            <button 
+              onClick={() => moveCameraStep('x', -1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px' }}
+            >-</button>
+            <button 
+              onClick={() => moveCameraStep('x', 1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px', marginLeft: '5px' }}
+            >+</button>
+          </div>
+          
+          {/* Y Position */}
+          <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'center' }}>
+            <div style={{ width: '20px' }}>Y:</div>
+            <input
+              type="text"
+              value={inputValues.position.y}
+              onChange={(e) => handleCoordinateInput('position', 'y', e.target.value)}
+              style={{ 
+                flex: 1,
+                margin: '0 10px',
+                background: '#222', 
+                color: 'white', 
+                border: '1px solid #444', 
+                padding: '4px' 
+              }}
+            />
+            <button 
+              onClick={() => moveCameraStep('y', -1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px' }}
+            >-</button>
+            <button 
+              onClick={() => moveCameraStep('y', 1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px', marginLeft: '5px' }}
+            >+</button>
+          </div>
+          
+          {/* Z Position */}
+          <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'center' }}>
+            <div style={{ width: '20px' }}>Z:</div>
+            <input
+              type="text"
+              value={inputValues.position.z}
+              onChange={(e) => handleCoordinateInput('position', 'z', e.target.value)}
+              style={{ 
+                flex: 1,
+                margin: '0 10px',
+                background: '#222', 
+                color: 'white', 
+                border: '1px solid #444', 
+                padding: '4px' 
+              }}
+            />
+            <button 
+              onClick={() => moveCameraStep('z', -1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px' }}
+            >-</button>
+            <button 
+              onClick={() => moveCameraStep('z', 1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px', marginLeft: '5px' }}
+            >+</button>
+          </div>
+        </div>
+        
+        {/* Target Controls */}
+        <div style={{ 
+          marginBottom: '15px', 
+          padding: '10px', 
+          background: 'rgba(255,255,255,0.1)',
+          borderRadius: '6px' 
+        }}>
+          <div style={{ fontWeight: 'bold', marginBottom: '8px' }}>Điểm Nhìn (Target):</div>
+          
+          {/* X Target */}
+          <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'center' }}>
+            <div style={{ width: '20px' }}>X:</div>
+            <input
+              type="text"
+              value={inputValues.target.x}
+              onChange={(e) => handleCoordinateInput('target', 'x', e.target.value)}
+              style={{ 
+                flex: 1,
+                margin: '0 10px',
+                background: '#222', 
+                color: 'white', 
+                border: '1px solid #444', 
+                padding: '4px' 
+              }}
+            />
+            <button 
+              onClick={() => moveCameraStep('target-x', -1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px' }}
+            >-</button>
+            <button 
+              onClick={() => moveCameraStep('target-x', 1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px', marginLeft: '5px' }}
+            >+</button>
+          </div>
+          
+          {/* Y Target */}
+          <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'center' }}>
+            <div style={{ width: '20px' }}>Y:</div>
+            <input
+              type="text"
+              value={inputValues.target.y}
+              onChange={(e) => handleCoordinateInput('target', 'y', e.target.value)}
+              style={{ 
+                flex: 1,
+                margin: '0 10px',
+                background: '#222', 
+                color: 'white', 
+                border: '1px solid #444', 
+                padding: '4px' 
+              }}
+            />
+            <button 
+              onClick={() => moveCameraStep('target-y', -1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px' }}
+            >-</button>
+            <button 
+              onClick={() => moveCameraStep('target-y', 1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px', marginLeft: '5px' }}
+            >+</button>
+          </div>
+          
+          {/* Z Target */}
+          <div style={{ marginBottom: '8px', display: 'flex', alignItems: 'center' }}>
+            <div style={{ width: '20px' }}>Z:</div>
+            <input
+              type="text"
+              value={inputValues.target.z}
+              onChange={(e) => handleCoordinateInput('target', 'z', e.target.value)}
+              style={{ 
+                flex: 1,
+                margin: '0 10px',
+                background: '#222', 
+                color: 'white', 
+                border: '1px solid #444', 
+                padding: '4px' 
+              }}
+            />
+            <button 
+              onClick={() => moveCameraStep('target-z', -1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px' }}
+            >-</button>
+            <button 
+              onClick={() => moveCameraStep('target-z', 1)}
+              style={{ width: '30px', background: '#555', border: 'none', color: 'white', borderRadius: '4px', marginLeft: '5px' }}
+            >+</button>
+          </div>
+        </div>
+        
+        {/* Action Buttons */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '10px' }}>
+          <button
+            onClick={getCurrentCamera}
+            style={{
+              background: '#4a90e2',
+              color: 'white',
+              border: 'none',
+              padding: '8px 12px',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              width: '48%'
+            }}
+          >
+            Lấy vị trí hiện tại
+          </button>
+          
+          <button
+            onClick={applyCamera}
+            style={{
+              background: '#FF7E5F',
+              color: 'white',
+              border: 'none',
+              padding: '8px 12px',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              width: '48%'
+            }}
+          >
+            Áp dụng vị trí
+          </button>
+        </div>
+        
+        {/* Save/Load Buttons */}
+        <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+          <button
+            onClick={saveCameraPosition}
+            style={{
+              background: '#27ae60',
+              color: 'white',
+              border: 'none',
+              padding: '8px 12px',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              width: '48%'
+            }}
+          >
+            Lưu vị trí
+          </button>
+          
+          <button
+            onClick={loadCameraPosition}
+            style={{
+              background: '#f39c12',
+              color: 'white',
+              border: 'none',
+              padding: '8px 12px',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              width: '48%'
+            }}
+          >
+            Tải vị trí đã lưu
+          </button>
+        </div>
+        
+        {/* Copy code button */}
+        <button
+          onClick={() => {
+            const codeString = `camera.position.set(${cameraControl.position.x}, ${cameraControl.position.y}, ${cameraControl.position.z});\ncamera.lookAt(${cameraControl.target.x}, ${cameraControl.target.y}, ${cameraControl.target.z});`;
+            navigator.clipboard.writeText(codeString);
+            alert("Đã sao chép code vào clipboard!");
+          }}
+          style={{
+            background: '#9b59b6',
+            color: 'white',
+            border: 'none',
+            padding: '8px 12px',
+            borderRadius: '4px',
+            cursor: 'pointer',
+            width: '100%',
+            marginTop: '10px'
+          }}
+        >
+          Sao chép code
+        </button>
+      </div>
+      
+      {/* Exit button - only visible when zoomed in */}
+      {isZoomedIn && (
+        <button
+          onClick={() => exitZoomRef.current && exitZoomRef.current()}
+          style={{
+            position: 'absolute',
+            top: '20px',
+            right: '20px',
+            background: 'rgba(255, 255, 255, 0.8)',
+            border: 'none',
+            borderRadius: '50%',
+            width: '50px',
+            height: '50px',
+            fontSize: '18px',
+            cursor: 'pointer',
+            boxShadow: '0 2px 10px rgba(0,0,0,0.2)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            transition: 'all 0.3s ease'
+          }}
+        >
+          ✕
+        </button>
+      )}
+      
+      {/* Thêm hướng dẫn tương tác - only visible when not zoomed in */}
+      {!isZoomedIn && (
+        <div style={{
+          position: 'absolute',
+          bottom: '50px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          color: 'white',
+          fontSize: '16px',
+          padding: '10px 20px',
+          borderRadius: '20px',
+          background: 'rgba(0,0,0,0.5)',
+          pointerEvents: 'none',
+          zIndex: 100,
+          textAlign: 'center',
+          textShadow: '0 2px 4px rgba(0,0,0,0.5)'
+        }}>
+          Di chuột vào ngôi nhà để xem gần hơn!
+        </div>
+      )}
+      
+      {/* Hiển thị tọa độ camera - show exact values with more decimal places */}
+      <div style={{
+        position: 'absolute',
+        top: '10px',
+        left: '10px',
+        color: 'white',
+        fontSize: '14px',
+        padding: '10px',
+        borderRadius: '8px',
+        background: 'rgba(0,0,0,0.6)',
+        zIndex: 100,
+        fontFamily: 'monospace'
+      }}>
+        <div><b>Camera Position:</b></div>
+        <div>X: {cameraControl.position.x.toFixed(2)}</div>
+        <div>Y: {cameraControl.position.y.toFixed(2)}</div>
+        <div>Z: {cameraControl.position.z.toFixed(2)}</div>
+      </div>
       
       {/* Thông tin debug ở góc màn hình */}
       <div style={{
@@ -744,3 +1960,97 @@ export default function GltfModelViewer({ onLoad, onError }) {
     </div>
   );
 } 
+
+// New Three.js component to synchronize camera with controls
+// This component only contains Three.js compatible code
+function CameraPositionSynchronizer({ cameraControl, isZoomedIn, controlsRef }) {
+  const { camera } = useThree();
+  
+  // Track when we need to apply camera position
+  const [needsUpdate, setNeedsUpdate] = useState(false);
+  
+  // Listen for changes in cameraControl and toggle needsUpdate flag
+  useEffect(() => {
+    setNeedsUpdate(true);
+    
+    // Clear flag after a short time to prevent continuous updates
+    const timer = setTimeout(() => {
+      setNeedsUpdate(false);
+    }, 100);
+    
+    return () => clearTimeout(timer);
+  }, [cameraControl]);
+  
+  // Apply camera position when needed
+  useEffect(() => {
+    if (needsUpdate && isZoomedIn) {
+      // Apply exact position for zoomed in state
+      if (camera) {
+        camera.position.set(
+          cameraControl.position.x,
+          cameraControl.position.y,
+          cameraControl.position.z
+        );
+        
+        // Update matrices
+        camera.updateMatrix();
+        camera.updateMatrixWorld();
+        camera.updateProjectionMatrix();
+        
+        console.log("Applied camera position from synchronizer:", 
+          camera.position.x, camera.position.y, camera.position.z
+        );
+      }
+      
+      // Update orbit controls target
+      if (controlsRef.current) {
+        controlsRef.current.target.set(
+          cameraControl.target.x,
+          cameraControl.target.y,
+          cameraControl.target.z
+        );
+        controlsRef.current.update();
+      }
+    }
+  }, [camera, controlsRef, cameraControl, needsUpdate, isZoomedIn]);
+  
+  return null;
+}
+
+// Create a wrapper for OrbitControls that handles animation states
+const OrbitControlsWrapper = React.forwardRef((props, ref) => {
+  const { isZoomedIn, ...rest } = props;
+  const controlsEnabled = !isZoomedIn;
+  
+  console.log("OrbitControlsWrapper rendered, controls enabled:", controlsEnabled, "isZoomedIn:", isZoomedIn);
+  
+  // Get OrbitControls reference
+  const controlsRef = useRef();
+  
+  // Forward ref
+  useImperativeHandle(ref, () => {
+    console.log("ImperativeHandle setup for OrbitControls");
+    return {
+      // Forward all properties and methods from OrbitControls
+      ...controlsRef.current,
+      // Add custom method to temporarily disable/enable controls
+      setEnabled: (enabled) => {
+        console.log("setEnabled called with:", enabled);
+        if (controlsRef.current) {
+          controlsRef.current.enabled = enabled;
+        }
+      }
+    };
+  }, [controlsRef.current]);
+  
+  return (
+    <OrbitControls 
+      ref={controlsRef}
+      enableZoom={controlsEnabled} 
+      enablePan={controlsEnabled}
+      enableRotate={controlsEnabled}
+      enabled={controlsEnabled}
+      {...rest}
+    />
+  );
+}); 
